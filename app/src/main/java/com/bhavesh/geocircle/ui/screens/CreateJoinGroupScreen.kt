@@ -245,18 +245,18 @@ fun CreateJoinGroupScreen(
                 .padding(16.dp)
                 .verticalScroll(rememberScrollState())
         ) {
-            TabRow(selectedTabIndex = selectedTab) {
-                Tab(
-                    selected = selectedTab == 0,
-                    onClick = { selectedTab = 0 },
-                    text = { Text("Create Group") }
-                )
-                Tab(
-                    selected = selectedTab == 1,
-                    onClick = { selectedTab = 1 },
-                    text = { Text("Join Group") }
-                )
-            }
+//            TabRow(selectedTabIndex = selectedTab) {
+//                Tab(
+//                    selected = selectedTab == 0,
+//                    onClick = { selectedTab = 0 },
+//                    text = { Text("Create Group") }
+//                )
+//                Tab(
+//                    selected = selectedTab == 1,
+//                    onClick = { selectedTab = 1 },
+//                    text = { Text("Join Group") }
+//                )
+//            }
 
             Spacer(modifier = Modifier.height(24.dp))
 
@@ -361,7 +361,7 @@ fun CreateJoinGroupScreen(
                 Slider(
                     value = radiusMeters,
                     onValueChange = { radiusMeters = it },
-                    valueRange = 1f..2000f,
+                    valueRange = 5f..2000f,
                     steps = 38,
                     modifier = Modifier.fillMaxWidth()
                 )

@@ -317,51 +317,51 @@ fun GroupDetailsScreen(
             }
 
             // Test Simulation Controls (Indispensable for assignment testing)
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            text = "🧪 Instant Test Simulation",
-                            style = MaterialTheme.typography.labelLarge,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = "Tap on Device 2 to simulate walking outside. Device 1 will immediately alert!",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    viewModel.simulateMemberStatus(groupId, isInside = false)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Simulate Exit")
-                            }
-
-                            Button(
-                                onClick = {
-                                    viewModel.simulateMemberStatus(groupId, isInside = true)
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text("Simulate Enter")
-                            }
-                        }
-                    }
-                }
-            }
+//            item {
+//                Card(
+//                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+//                    modifier = Modifier.fillMaxWidth()
+//                ) {
+//                    Column(modifier = Modifier.padding(12.dp)) {
+//                        Text(
+//                            text = "🧪 Instant Test Simulation",
+//                            style = MaterialTheme.typography.labelLarge,
+//                            fontWeight = FontWeight.Bold
+//                        )
+//                        Spacer(modifier = Modifier.height(4.dp))
+//                        Text(
+//                            text = "Tap on Device 2 to simulate walking outside. Device 1 will immediately alert!",
+//                            style = MaterialTheme.typography.bodySmall,
+//                            color = MaterialTheme.colorScheme.onSurfaceVariant
+//                        )
+//                        Spacer(modifier = Modifier.height(8.dp))
+//                        Row(
+//                            modifier = Modifier.fillMaxWidth(),
+//                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+//                        ) {
+//                            Button(
+//                                onClick = {
+//                                    viewModel.simulateMemberStatus(groupId, isInside = false)
+//                                },
+//                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFC62828)),
+//                                modifier = Modifier.weight(1f)
+//                            ) {
+//                                Text("Simulate Exit")
+//                            }
+//
+//                            Button(
+//                                onClick = {
+//                                    viewModel.simulateMemberStatus(groupId, isInside = true)
+//                                },
+//                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32)),
+//                                modifier = Modifier.weight(1f)
+//                            ) {
+//                                Text("Simulate Enter")
+//                            }
+//                        }
+//                    }
+//                }
+//            }
 
             // Member List header
             item {
