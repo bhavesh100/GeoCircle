@@ -18,7 +18,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import com.bhavesh.geocircle.MainActivity
-import com.bhavesh.geocircle.R
 import com.bhavesh.geocircle.data.Group
 import com.bhavesh.geocircle.data.GroupRepository
 import com.bhavesh.geocircle.geofence.GeofenceMonitor
@@ -32,6 +31,7 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -49,6 +49,11 @@ class LocationTrackingService : Service() {
     private var geofenceMonitor: GeofenceMonitor? = null
     private var groupListenerRegistration: ListenerRegistration? = null
     private var activeGroupId: String? = null
+    private var currentGroupName: String = "group"
+
+    private var membersJob: Job? = null
+    private val previousInsideState = mutableMapOf<String, Boolean>()
+    private var isFirstSnapshot = true
 
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
@@ -64,7 +69,7 @@ class LocationTrackingService : Service() {
     override fun onCreate() {
         super.onCreate()
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this)
-        createNotificationChannel()
+        createNotificationChannels()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -90,7 +95,7 @@ class LocationTrackingService : Service() {
         _currentTrackedGroupId.value = groupId
         _isTracking.value = true
 
-        val notification = createNotification("Tracking group: Connecting...")
+        val notification = createOngoingNotification("Tracking group: Connecting...")
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(
                 this,
@@ -103,6 +108,7 @@ class LocationTrackingService : Service() {
         }
 
         listenToGroupDetails(groupId)
+        observeGroupMembers(groupId)
         requestLocationUpdates()
     }
 
@@ -118,15 +124,76 @@ class LocationTrackingService : Service() {
 
                 val group = snapshot?.toObject(Group::class.java)?.copy(id = snapshot.id)
                 if (group != null) {
+                    currentGroupName = group.name
                     if (geofenceMonitor == null) {
                         geofenceMonitor = GeofenceMonitor(group, repository)
                     } else {
                         geofenceMonitor?.group = group
                     }
 
-                    updateNotification("Monitoring geofence for: ${group.name}")
+                    updateOngoingNotification("Monitoring geofence for: ${group.name}")
                 }
             }
+    }
+
+    private fun observeGroupMembers(groupId: String) {
+        membersJob?.cancel()
+        previousInsideState.clear()
+        isFirstSnapshot = true
+
+        membersJob = serviceScope.launch {
+            val myUid = repository.currentUserId
+            Log.d(TAG, "Starting observeMembers for group: $groupId, current user: $myUid")
+
+            repository.observeMembers(groupId).collect { members ->
+                if (isFirstSnapshot) {
+                    // Seed existing member state to avoid triggering duplicate notifications on initial load
+                    members.forEach { member ->
+                        previousInsideState[member.uid] = member.isInside
+                    }
+                    isFirstSnapshot = false
+                    Log.d(TAG, "Initial members snapshot loaded: ${members.size} members")
+                    return@collect
+                }
+
+                members.forEach { member ->
+                    val wasInside = previousInsideState[member.uid]
+
+                    // Alert when a member other than me transitions from true -> false
+                    if (member.uid != myUid && wasInside == true && !member.isInside) {
+                        Log.i(TAG, "Breach detected: ${member.name} left $currentGroupName zone")
+                        showBreachNotification(member.name, currentGroupName)
+                    }
+
+                    previousInsideState[member.uid] = member.isInside
+                }
+            }
+        }
+    }
+
+    private fun showBreachNotification(memberName: String, groupName: String) {
+        val launchIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            this,
+            System.currentTimeMillis().toInt(),
+            launchIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val notification = NotificationCompat.Builder(this, BREACH_CHANNEL_ID)
+            .setContentTitle("Geofence Alert")
+            .setContentText("$memberName left $groupName zone")
+            .setSmallIcon(android.R.drawable.ic_dialog_alert)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setAutoCancel(true)
+            .setContentIntent(pendingIntent)
+            .build()
+
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager?.notify((System.currentTimeMillis() % 100000).toInt(), notification)
     }
 
     private fun requestLocationUpdates() {
@@ -164,6 +231,11 @@ class LocationTrackingService : Service() {
 
     private fun stopTracking() {
         Log.d(TAG, "Stopping location tracking service")
+        membersJob?.cancel()
+        membersJob = null
+        previousInsideState.clear()
+        isFirstSnapshot = true
+
         groupListenerRegistration?.remove()
         groupListenerRegistration = null
         geofenceMonitor = null
@@ -176,21 +248,34 @@ class LocationTrackingService : Service() {
         stopSelf()
     }
 
-    private fun createNotificationChannel() {
+    private fun createNotificationChannels() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
+            val manager = getSystemService(NotificationManager::class.java) ?: return
+
+            // 1. Ongoing foreground service channel (LOW importance)
+            val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "Location Tracking Service",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = "Shows persistent status while GeoCircle tracks geofence coordinates"
             }
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            manager.createNotificationChannel(serviceChannel)
+
+            // 2. High-importance channel for geofence breach alerts (IMPORTANCE_HIGH)
+            val breachChannel = NotificationChannel(
+                BREACH_CHANNEL_ID,
+                "Geofence Breach Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+            ).apply {
+                description = "Alerts when group members leave the safe zone"
+                enableVibration(true)
+            }
+            manager.createNotificationChannel(breachChannel)
         }
     }
 
-    private fun createNotification(contentText: String): Notification {
+    private fun createOngoingNotification(contentText: String): Notification {
         val launchIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -222,9 +307,9 @@ class LocationTrackingService : Service() {
             .build()
     }
 
-    private fun updateNotification(contentText: String) {
+    private fun updateOngoingNotification(contentText: String) {
         val manager = getSystemService(NotificationManager::class.java)
-        manager?.notify(NOTIFICATION_ID, createNotification(contentText))
+        manager?.notify(NOTIFICATION_ID, createOngoingNotification(contentText))
     }
 
     override fun onDestroy() {
@@ -241,6 +326,7 @@ class LocationTrackingService : Service() {
         const val EXTRA_GROUP_ID = "extra_group_id"
 
         private const val CHANNEL_ID = "geocircle_location_tracking"
+        private const val BREACH_CHANNEL_ID = "geofence_breach_alerts"
         private const val NOTIFICATION_ID = 2001
         private const val TAG = "LocationTrackingService"
 
