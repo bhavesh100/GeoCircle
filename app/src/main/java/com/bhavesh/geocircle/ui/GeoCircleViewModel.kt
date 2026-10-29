@@ -1,13 +1,26 @@
 package com.bhavesh.geocircle.ui
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.bhavesh.geocircle.data.model.Group
+import com.google.firebase.auth.FirebaseAuth
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
 import java.util.UUID
 
 class GeoCircleViewModel : ViewModel() {
+
+    private val auth: FirebaseAuth by lazy { FirebaseAuth.getInstance() }
+
+    private val _uid = MutableStateFlow<String?>(null)
+    val uid: StateFlow<String?> = _uid.asStateFlow()
+
+    private val _authError = MutableStateFlow<String?>(null)
+    val authError: StateFlow<String?> = _authError.asStateFlow()
 
     private val initialGroups = listOf(
         Group(
@@ -30,6 +43,30 @@ class GeoCircleViewModel : ViewModel() {
 
     private val _groups = MutableStateFlow<List<Group>>(initialGroups)
     val groups: StateFlow<List<Group>> = _groups.asStateFlow()
+
+    init {
+        signInAnonymously()
+    }
+
+    fun signInAnonymously() {
+        viewModelScope.launch {
+            try {
+                val currentUser = auth.currentUser
+                if (currentUser != null) {
+                    _uid.value = currentUser.uid
+                    Log.d("GeoCircleAuth", "Already authenticated with UID: ${currentUser.uid}")
+                } else {
+                    val authResult = auth.signInAnonymously().await()
+                    val newUid = authResult.user?.uid
+                    _uid.value = newUid
+                    Log.d("GeoCircleAuth", "Signed in anonymously with UID: $newUid")
+                }
+            } catch (e: Exception) {
+                Log.e("GeoCircleAuth", "Anonymous sign-in failed", e)
+                _authError.value = e.localizedMessage ?: "Failed to sign in anonymously"
+            }
+        }
+    }
 
     fun createGroup(name: String): Group {
         val code = "GEO" + (100..999).random()
