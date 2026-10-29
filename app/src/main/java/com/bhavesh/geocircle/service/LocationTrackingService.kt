@@ -27,6 +27,7 @@ import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import kotlinx.coroutines.CoroutineScope
@@ -58,7 +59,7 @@ class LocationTrackingService : Service() {
     private val locationCallback = object : LocationCallback() {
         override fun onLocationResult(result: LocationResult) {
             val location = result.lastLocation ?: return
-            Log.d(TAG, "Location received: lat=${location.latitude}, lng=${location.longitude}")
+            Log.d(TAG, "GPS location received: lat=${location.latitude}, lng=${location.longitude}, acc=${location.accuracy}m")
 
             serviceScope.launch {
                 geofenceMonitor?.onLocation(location.latitude, location.longitude)
@@ -142,26 +143,30 @@ class LocationTrackingService : Service() {
         isFirstSnapshot = true
 
         membersJob = serviceScope.launch {
-            val myUid = repository.currentUserId
-            Log.d(TAG, "Starting observeMembers for group: $groupId, current user: $myUid")
-
             repository.observeMembers(groupId).collect { members ->
+                val myUid = repository.currentUserId ?: FirebaseAuth.getInstance().currentUser?.uid
+                Log.d(TAG, "observeMembers: ${members.size} members, current user: $myUid, firstSnapshot=$isFirstSnapshot")
+
                 if (isFirstSnapshot) {
-                    // Seed existing member state to avoid triggering duplicate notifications on initial load
                     members.forEach { member ->
                         previousInsideState[member.uid] = member.isInside
                     }
                     isFirstSnapshot = false
-                    Log.d(TAG, "Initial members snapshot loaded: ${members.size} members")
                     return@collect
                 }
 
+                val now = System.currentTimeMillis()
                 members.forEach { member ->
                     val wasInside = previousInsideState[member.uid]
+                    Log.d(TAG, "Member check [${member.name}]: wasInside=$wasInside, nowInside=${member.isInside}, myUid=$myUid, memberUid=${member.uid}")
 
-                    // Alert when a member other than me transitions from true -> false
-                    if (member.uid != myUid && wasInside == true && !member.isInside) {
-                        Log.i(TAG, "Breach detected: ${member.name} left $currentGroupName zone")
+                    val isOtherMember = member.uid.isNotBlank() && member.uid != myUid
+                    val transitionedToOutside = wasInside == true && !member.isInside
+                    // Or if wasInside was not yet recorded, but member updated to outside recently (within 30s)
+                    val freshlyBreached = wasInside == null && !member.isInside && (now - member.updatedAt < 30_000L)
+
+                    if (isOtherMember && (transitionedToOutside || freshlyBreached)) {
+                        Log.i(TAG, "🚨 Breach detected: ${member.name} left $currentGroupName zone")
                         showBreachNotification(member.name, currentGroupName)
                     }
 
@@ -183,17 +188,26 @@ class LocationTrackingService : Service() {
         )
 
         val notification = NotificationCompat.Builder(this, BREACH_CHANNEL_ID)
-            .setContentTitle("Geofence Alert")
+            .setContentTitle("⚠️ Geofence Breach Alert")
             .setContentText("$memberName left $groupName zone")
             .setSmallIcon(android.R.drawable.ic_dialog_alert)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setDefaults(NotificationCompat.DEFAULT_ALL)
+            .setVibrate(longArrayOf(0, 500, 250, 500))
             .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()
 
         val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager?.notify((System.currentTimeMillis() % 100000).toInt(), notification)
+        val alertId = (System.currentTimeMillis() % 100000).toInt()
+        notificationManager?.notify(alertId, notification)
+        Log.i(TAG, "Breach notification dispatched with id $alertId for $memberName")
+
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(applicationContext, "🚨 $memberName left $groupName zone!", android.widget.Toast.LENGTH_LONG).show()
+        }
     }
 
     private fun requestLocationUpdates() {
@@ -206,13 +220,13 @@ class LocationTrackingService : Service() {
                 Manifest.permission.ACCESS_COARSE_LOCATION
             ) != PackageManager.PERMISSION_GRANTED
         ) {
-            Log.e(TAG, "Location permissions missing. Stopping tracking service.")
-            stopTracking()
+            Log.e(TAG, "Location permissions missing on this device. Stopping tracking.")
             return
         }
 
-        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 10_000L)
-            .setMinUpdateIntervalMillis(5_000L)
+        val locationRequest = LocationRequest.Builder(Priority.PRIORITY_HIGH_ACCURACY, 5_000L)
+            .setMinUpdateIntervalMillis(2_000L)
+            .setMinUpdateDistanceMeters(0f) // Deliver updates even for small movements
             .setWaitForAccurateLocation(false)
             .build()
 
@@ -222,10 +236,9 @@ class LocationTrackingService : Service() {
                 locationCallback,
                 Looper.getMainLooper()
             )
-            Log.d(TAG, "Location updates successfully requested")
+            Log.d(TAG, "Location updates requested (interval: 5s, distance: 0m)")
         } catch (e: SecurityException) {
             Log.e(TAG, "SecurityException while requesting location updates", e)
-            stopTracking()
         }
     }
 
@@ -252,7 +265,6 @@ class LocationTrackingService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val manager = getSystemService(NotificationManager::class.java) ?: return
 
-            // 1. Ongoing foreground service channel (LOW importance)
             val serviceChannel = NotificationChannel(
                 CHANNEL_ID,
                 "Location Tracking Service",
@@ -262,7 +274,6 @@ class LocationTrackingService : Service() {
             }
             manager.createNotificationChannel(serviceChannel)
 
-            // 2. High-importance channel for geofence breach alerts (IMPORTANCE_HIGH)
             val breachChannel = NotificationChannel(
                 BREACH_CHANNEL_ID,
                 "Geofence Breach Alerts",
@@ -270,6 +281,8 @@ class LocationTrackingService : Service() {
             ).apply {
                 description = "Alerts when group members leave the safe zone"
                 enableVibration(true)
+                enableLights(true)
+                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
             }
             manager.createNotificationChannel(breachChannel)
         }

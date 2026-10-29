@@ -1,7 +1,9 @@
 package com.bhavesh.geocircle.data
 
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -40,6 +42,15 @@ class GroupRepository(
         return generateRandomCode()
     }
 
+    suspend fun getGroup(groupId: String): Group? {
+        return try {
+            val doc = firestore.collection("groups").document(groupId).get().await()
+            doc.toObject(Group::class.java)?.copy(id = doc.id)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     suspend fun createGroup(
         name: String,
         lat: Double,
@@ -58,7 +69,8 @@ class GroupRepository(
             centerLat = lat,
             centerLng = lng,
             radiusMeters = radius,
-            createdBy = uid
+            createdBy = uid,
+            memberIds = listOf(uid)
         )
 
         groupDocRef.set(group).await()
@@ -97,6 +109,12 @@ class GroupRepository(
         val groupDoc = querySnapshot.documents.first()
         val group = groupDoc.toObject(Group::class.java)?.copy(id = groupDoc.id) ?: return null
 
+        // Add user to memberIds array
+        firestore.collection("groups")
+            .document(group.id)
+            .update("memberIds", FieldValue.arrayUnion(uid))
+            .await()
+
         val newMember = Member(
             uid = uid,
             name = userName.trim().ifBlank { "Member" },
@@ -116,6 +134,45 @@ class GroupRepository(
         return group
     }
 
+    fun observeUserGroups(uid: String): Flow<List<Group>> = callbackFlow {
+        val listenerRegistration = firestore.collection("groups")
+            .whereArrayContains("memberIds", uid)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    close(error)
+                    return@addSnapshotListener
+                }
+
+                val groups = snapshot?.documents?.mapNotNull { doc ->
+                    doc.toObject(Group::class.java)?.copy(id = doc.id)
+                } ?: emptyList()
+
+                trySend(groups)
+            }
+
+        awaitClose {
+            listenerRegistration.remove()
+        }
+    }
+
+    fun observeGroup(groupId: String): Flow<Group?> = callbackFlow {
+        val listenerRegistration = firestore.collection("groups")
+            .document(groupId)
+            .addSnapshotListener { snapshot, error ->
+                if (error != null) {
+                    close(error)
+                    return@addSnapshotListener
+                }
+
+                val group = snapshot?.toObject(Group::class.java)?.copy(id = snapshot.id)
+                trySend(group)
+            }
+
+        awaitClose {
+            listenerRegistration.remove()
+        }
+    }
+
     fun observeMembers(groupId: String): Flow<List<Member>> = callbackFlow {
         val listenerRegistration = firestore.collection("groups")
             .document(groupId)
@@ -127,7 +184,10 @@ class GroupRepository(
                 }
 
                 val members = snapshot?.documents?.mapNotNull { doc ->
-                    doc.toObject(Member::class.java)
+                    val member = doc.toObject(Member::class.java) ?: return@mapNotNull null
+                    // Guarantee both 'isInside' and 'inside' are accurately read
+                    val insideVal = doc.getBoolean("isInside") ?: doc.getBoolean("inside") ?: member.isInside
+                    member.copy(isInside = insideVal)
                 } ?: emptyList()
 
                 trySend(members)
@@ -149,24 +209,34 @@ class GroupRepository(
             "lat" to lat,
             "lng" to lng,
             "isInside" to isInside,
+            "inside" to isInside,
             "updatedAt" to System.currentTimeMillis()
         )
 
+        // Using set with merge to ensure it creates or updates safely
         firestore.collection("groups")
             .document(groupId)
             .collection("members")
             .document(uid)
-            .update(updates)
+            .set(updates, SetOptions.merge())
             .await()
     }
 
     suspend fun leaveGroup(groupId: String): Result<Unit> = runCatching {
         val uid = currentUserId ?: throw IllegalStateException("User not authenticated")
+        
+        // Remove from members subcollection
         firestore.collection("groups")
             .document(groupId)
             .collection("members")
             .document(uid)
             .delete()
+            .await()
+
+        // Remove from group memberIds
+        firestore.collection("groups")
+            .document(groupId)
+            .update("memberIds", FieldValue.arrayRemove(uid))
             .await()
     }
 }
